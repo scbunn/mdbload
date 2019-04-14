@@ -31,11 +31,11 @@ var cfgFile string
 var rootCmd = &cobra.Command{
 	Use:   "mdbload",
 	Short: "MongoDB Load Testing Tool",
-	Long: `Load test a mongodb cluster by generating read/write load against
-a cluster.
+	Long: `Load test a mongodb cluster by generating read/write load against a cluster for a specific duration.
 
-mdbload can be running as a single instance of distributed through a
-kubernetes cluters.`,
+mdbload can run locally for small tests; however, for large tests mdbload is designed to scale by distributing load
+generation through a kubernetes cluster.  For more information on configuration and operation please see the provided
+documentation.`,
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
