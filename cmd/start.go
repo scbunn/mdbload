@@ -17,8 +17,12 @@ package cmd
 
 import (
 	"fmt"
+	"time"
+
+	"github.com/scbunn/mdbload/pkg/mongo"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 )
 
 // startCmd represents the start command
@@ -27,10 +31,42 @@ var startCmd = &cobra.Command{
 	Short: "Start a load test",
 	Long:  `Starts a new load test against a mongodb cluter`,
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("start called")
+		fmt.Println("start called: " + viper.GetString("mongodb.connectionString"))
+		mdb := mongo.MongoTest{
+			ConnectionString: viper.GetString("mongodb.connectionString"),
+			Timeout:          viper.GetDuration("mongodb.serverTimeout"),
+			Database:         viper.GetString("mongodb.database"),
+			Collection:       viper.GetString("mongodb.collection"),
+		}
+		var documents []string
+		var bsonDocuments []interface{}
+		documents = append(documents, "{\"name\": \"foobar\"}")
+		documents = append(documents, "{\"name\": \"bob jones\"}")
+
+		for _, doc := range documents {
+			bson := mdb.ConvertJSONtoBSON(doc)
+			bsonDocuments = append(bsonDocuments, bson)
+		}
+
+		fmt.Println(mdb.InsertDocuments(bsonDocuments))
 	},
 }
 
 func init() {
 	rootCmd.AddCommand(startCmd)
+
+	// General flags
+	startCmd.Flags().Duration("duration", 30*time.Second, "Duration of the load test")
+	viper.BindPFlag("duration", startCmd.Flags().Lookup("duration"))
+
+	// MongoDB settings
+	startCmd.Flags().String("mongodb-connection-string", "mongodb://127.0.0.1:27017", "MongoDB Connection String")
+	viper.BindPFlag("mongodb.connectionString", startCmd.Flags().Lookup("mongodb-connection-string"))
+	startCmd.Flags().Duration("mongodb-server-timeout", 1*time.Second, "MongoDB server connection timeout")
+	viper.BindPFlag("mongodb.serverTimeout", startCmd.Flags().Lookup("mongodb-server-timeout"))
+	startCmd.Flags().String("mongodb-database", "loadtest", "Database to use for load tests")
+	viper.BindPFlag("mongodb.database", startCmd.Flags().Lookup("mongodb-database"))
+	startCmd.Flags().String("mongodb-collection", "samples", "Collection to use for load tests")
+	viper.BindPFlag("mongodb.collection", startCmd.Flags().Lookup("mongodb-collection"))
+
 }
