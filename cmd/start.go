@@ -16,7 +16,10 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
+	"log"
+	"sync"
 	"time"
 
 	"github.com/scbunn/mdbload/pkg/mongo"
@@ -32,11 +35,20 @@ var startCmd = &cobra.Command{
 	Long:  `Starts a new load test against a mongodb cluter`,
 	Run: func(cmd *cobra.Command, args []string) {
 		fmt.Println("start called: " + viper.GetString("mongodb.connectionString"))
-		mdb := mongo.MongoTest{
+		ctx := context.Background()
+		ctx, cancel := context.WithCancel(ctx)
+		defer cancel()
+
+		// MongoLoad Options
+		options := mongo.MongoLoadOptions{
 			ConnectionString: viper.GetString("mongodb.connectionString"),
-			Timeout:          viper.GetDuration("mongodb.serverTimeout"),
 			Database:         viper.GetString("mongodb.database"),
 			Collection:       viper.GetString("mongodb.collection"),
+			TestDuration:     viper.GetDuration("duration"),
+		}
+		mdb := new(mongo.MongoLoad)
+		if err := mdb.Init(ctx, options); err != nil {
+			log.Fatal(err)
 		}
 		var documents []string
 		var bsonDocuments []interface{}
@@ -48,8 +60,84 @@ var startCmd = &cobra.Command{
 			bsonDocuments = append(bsonDocuments, bson)
 		}
 
-		fmt.Println(mdb.InsertDocuments(bsonDocuments))
+		// initial variables
+		var loadResults []*mongo.OperationResult
+		results := make(chan *mongo.OperationResult, 1024)
+		docChannel := make(chan interface{}, 10)
+		defer close(docChannel)
+
+		// wait groups for to sync go routines
+		var loadWaitGroup sync.WaitGroup
+		var utilityWaitGroup sync.WaitGroup
+		doneChannel := make(chan bool)
+		pgExit := make(chan bool)
+		defer close(doneChannel)
+		defer close(pgExit)
+
+		// start utility routines
+		utilityWaitGroup.Add(3)
+		go updateDocument(bsonDocuments, docChannel, &utilityWaitGroup, doneChannel)
+		go getResults(results, &loadResults, &utilityWaitGroup)
+		go pushMetrics(viper.GetDuration("telemetry.pushgateway.frequency"), &utilityWaitGroup, pgExit)
+
+		// Start Load Generation
+		for i := 0; i < 20; i++ {
+			loadWaitGroup.Add(1)
+			go mdb.InsertOneRoutine(docChannel, results, &loadWaitGroup)
+		}
+		loadWaitGroup.Wait()
+		fmt.Println("done with load")
+
+		// clean up utility routines
+		close(results)
+		doneChannel <- true
+		pgExit <- true
+		utilityWaitGroup.Wait()
+
+		// get the results
+		fmt.Printf("documents: %v\n", len(loadResults))
 	},
+}
+
+// pushMetrics pushes prometheus metrics to a push gateway every n seconds
+func pushMetrics(d time.Duration, wg *sync.WaitGroup, exit chan bool) {
+	defer wg.Done()
+	for {
+		select {
+		case <-time.After(d):
+			fmt.Println("pushing metrics")
+		case <-exit:
+			fmt.Println("metrics shutting down")
+			return
+		}
+	}
+}
+
+func getResults(results chan *mongo.OperationResult, r *[]*mongo.OperationResult, wg *sync.WaitGroup) {
+	defer wg.Done()
+	for {
+		select {
+		case opResult, ok := <-results:
+			if !ok { // channel was closed; bail
+				fmt.Println("getResults is closing down shop")
+				return
+			}
+			*r = append(*r, opResult)
+		}
+	}
+}
+
+func updateDocument(documents []interface{}, docs chan interface{}, wg *sync.WaitGroup, done chan bool) {
+	defer wg.Done()
+	for {
+		select {
+		case <-done:
+			fmt.Println("updateDocument closing down shop")
+			return
+		case docs <- documents[0]:
+		default:
+		}
+	}
 }
 
 func init() {
@@ -69,4 +157,7 @@ func init() {
 	startCmd.Flags().String("mongodb-collection", "samples", "Collection to use for load tests")
 	viper.BindPFlag("mongodb.collection", startCmd.Flags().Lookup("mongodb-collection"))
 
+	// Telemetry
+	startCmd.Flags().Duration("pushgateway-frequency", 30*time.Second, "Frequency to push metrics to a prometheus push gateway")
+	viper.BindPFlag("telemetry.pushgateway.frequency", startCmd.Flags().Lookup("pushgateway-frequency"))
 }
