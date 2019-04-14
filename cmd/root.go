@@ -27,6 +27,12 @@ import (
 
 var cfgFile string
 
+var (
+	VERSION   string
+	GITSHA    string
+	BUILDTIME string
+)
+
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
 	Use:   "mdbload",
@@ -40,7 +46,10 @@ documentation.`,
 
 // Execute adds all child commands to the root command and sets flags appropriately.
 // This is called by main.main(). It only needs to happen once to the rootCmd.
-func Execute() {
+func Execute(version string, sha string, date string) {
+	VERSION = version
+	GITSHA = sha
+	BUILDTIME = date
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Println(err)
 		os.Exit(1)

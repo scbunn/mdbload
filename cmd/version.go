@@ -13,20 +13,23 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <http://www.gnu.org/licenses/>.
 
-package main
+package cmd
 
-import "github.com/scbunn/mdbload/cmd"
+import (
+	"fmt"
 
-var (
-	// BuildInfo should get set at build time
-	// -ldflags "-X main.VERSION=v1.0.0" \
-	// -ldflags "-X main.GIT_SHA=0a000" \
-	// -ldflags "-X main.BUILD_DATE=20190101.00000"
-	VERSION    = "v0.0.1"
-	GIT_SHA    = "00000"
-	BUILD_DATE = "19720101.0000"
+	"github.com/spf13/cobra"
 )
 
-func main() {
-	cmd.Execute(VERSION, GIT_SHA, BUILD_DATE)
+// versionCmd represents the version command
+var versionCmd = &cobra.Command{
+	Use:   "version",
+	Short: "Show version information",
+	Run: func(cmd *cobra.Command, args []string) {
+		fmt.Printf("%s %s [%s] build %s\n", rootCmd.Use, VERSION, GITSHA, BUILDTIME)
+	},
+}
+
+func init() {
+	rootCmd.AddCommand(versionCmd)
 }
