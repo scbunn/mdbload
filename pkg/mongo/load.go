@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/scbunn/mdbload/pkg/telemetry"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -101,7 +102,6 @@ func (m *MongoLoad) InsertDocuments(documents []interface{}) (*OperationResult, 
 		fmt.Println(err)
 		return &opResult, nil
 	}
-	fmt.Println("didn't fail")
 	opResult.Success = true
 	return &opResult, m.ObjectIDsToString(result.InsertedIDs)
 
@@ -114,20 +114,26 @@ func (m *MongoLoad) InsertDocuments(documents []interface{}) (*OperationResult, 
 //empty string.
 //
 //document is expected to be a BSON object
-func (m *MongoLoad) InsertDocument(document interface{}) (*OperationResult, string) {
+func (m *MongoLoad) InsertDocument(document interface{}, metrics *telemetry.PrometheusMetrics) (*OperationResult, string) {
 	opResult := OperationResult{
 		Operation:     "InsertOne",
 		DocumentCount: 1,
 	}
+	inserts := *metrics.Inserts
+	insertLatency := *metrics.InsertLatency
+	failedInserts := *metrics.FailedInserts
 
+	inserts.Inc()
 	collection := m.db.Collection(m.options.Collection)
 	start := time.Now()
 	result, err := collection.InsertOne(m.ctx, document)
 	opResult.Duration = time.Since(start).Seconds()
+	insertLatency.Observe(opResult.Duration)
 
 	if err != nil {
 		opResult.Success = false
 		fmt.Println(err)
+		failedInserts.Inc()
 		return &opResult, ""
 	}
 	opResult.Success = true
@@ -165,7 +171,7 @@ func (m *MongoLoad) ConvertJSONtoBSON(document string) interface{} {
 // or a request to exit.
 //
 // InsertOne expects a document channel
-func (m *MongoLoad) InsertOneRoutine(docs chan interface{}, results chan *OperationResult, waitGroup *sync.WaitGroup) {
+func (m *MongoLoad) InsertOneRoutine(docs chan interface{}, results chan *OperationResult, waitGroup *sync.WaitGroup, metrics *telemetry.PrometheusMetrics) {
 	defer waitGroup.Done()
 	timeout := time.After(m.options.TestDuration)
 
@@ -181,7 +187,7 @@ func (m *MongoLoad) InsertOneRoutine(docs chan interface{}, results chan *Operat
 		}
 
 		// write a document
-		or, _ := m.InsertDocument(document)
+		or, _ := m.InsertDocument(document, metrics)
 		if !or.Success {
 			fmt.Printf("insert failed: %v\n", or)
 		}

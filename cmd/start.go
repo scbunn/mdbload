@@ -93,14 +93,16 @@ var startCmd = &cobra.Command{
 
 		// start utility routines
 		utilityWaitGroup.Add(3)
-		go updateDocument(bsonDocuments, docChannel, &utilityWaitGroup, doneChannel)
+		metrics := telemetry.PrometheusMetrics{}
+		metrics.Init()
+		go updateDocument(bsonDocuments, docChannel, &utilityWaitGroup, doneChannel, &metrics)
 		go getResults(results, resultsQueue, &utilityWaitGroup)
-		go telemetry.PushMetrics(promOptions, &utilityWaitGroup, pgExit)
+		go telemetry.PushMetrics(promOptions, &metrics, &utilityWaitGroup, pgExit)
 
 		// Start Load Generation
 		for i := 0; i < 20; i++ {
 			loadWaitGroup.Add(1)
-			go mdb.InsertOneRoutine(docChannel, results, &loadWaitGroup)
+			go mdb.InsertOneRoutine(docChannel, results, &loadWaitGroup, &metrics)
 		}
 		loadWaitGroup.Wait()
 		fmt.Println("done with load")
@@ -113,7 +115,7 @@ var startCmd = &cobra.Command{
 
 		// get the results
 		fmt.Printf("documents: %v\n", resultsQueue.Size())
-		fmt.Printf("TPS: %v\n", telemetry.TPS(resultsQueue, mongoOptions.TestDuration))
+		//		fmt.Printf("TPS: %v\n", telemetry.TPS(resultsQueue, mongoOptions.TestDuration))
 	},
 }
 
@@ -131,14 +133,16 @@ func getResults(results chan *mongo.OperationResult, q *lane.Queue, wg *sync.Wai
 	}
 }
 
-func updateDocument(documents []interface{}, docs chan interface{}, wg *sync.WaitGroup, done chan bool) {
+func updateDocument(documents []interface{}, docs chan interface{}, wg *sync.WaitGroup, done chan bool, metrics *telemetry.PrometheusMetrics) {
 	defer wg.Done()
+	templatesGenerated := *metrics.TemplatesGenerated
 	for {
 		select {
 		case <-done:
 			fmt.Println("updateDocument closing down shop")
 			return
 		case docs <- documents[0]:
+			templatesGenerated.Inc()
 		default:
 		}
 	}
@@ -164,4 +168,6 @@ func init() {
 	// Telemetry
 	startCmd.Flags().Duration("pushgateway-frequency", 30*time.Second, "Frequency to push metrics to a prometheus push gateway")
 	viper.BindPFlag("telemetry.pushgateway.frequency", startCmd.Flags().Lookup("pushgateway-frequency"))
+	startCmd.Flags().String("pushgateway-server", "127.0.0.1:9091", "Server and port of the prometheus push gateway")
+	viper.BindPFlag("telemetry.pushgateway.server", startCmd.Flags().Lookup("pushgateway-server"))
 }
