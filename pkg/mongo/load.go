@@ -31,10 +31,10 @@ import (
 // The OperationResult is used to compute load statistics for display output and
 // is not used as a part of the prometheus chain if prometheus is enabled.
 type OperationResult struct {
-	operation     string
-	duration      float64
-	documentCount int
-	success       bool
+	Operation     string
+	Duration      float64
+	DocumentCount int
+	Success       bool
 }
 
 // MongoLoadOptions type for containing load testing options
@@ -58,7 +58,7 @@ type MongoLoad struct {
 // Init Initialize a new connection to mongo and set the database
 // If Init fails to initialize a database then all other mongo operations will
 // fail.
-func (m *MongoLoad) Init(ctx context.Context, opts MongoLoadOptions) error {
+func (m *MongoLoad) Init(ctx context.Context, opts *MongoLoadOptions) error {
 	o := options.Client()
 	o.SetMaxPoolSize(100)
 	client, err := mongo.NewClient(o.ApplyURI(opts.ConnectionString))
@@ -73,7 +73,7 @@ func (m *MongoLoad) Init(ctx context.Context, opts MongoLoadOptions) error {
 	m.ctx = ctx
 	db := client.Database(opts.Database)
 	m.db = db
-	m.options = &opts
+	m.options = opts
 	return nil
 }
 
@@ -88,21 +88,21 @@ func (m *MongoLoad) Init(ctx context.Context, opts MongoLoadOptions) error {
 // ObjectID
 func (m *MongoLoad) InsertDocuments(documents []interface{}) (*OperationResult, []string) {
 	opResult := OperationResult{
-		operation:     "InsertMany",
-		documentCount: len(documents),
+		Operation:     "InsertMany",
+		DocumentCount: len(documents),
 	}
 	collection := m.db.Collection(m.options.Collection)
 	start := time.Now()
 	result, err := collection.InsertMany(m.ctx, documents)
-	opResult.duration = time.Since(start).Seconds()
+	opResult.Duration = time.Since(start).Seconds()
 
 	if err != nil {
-		opResult.success = false
+		opResult.Success = false
 		fmt.Println(err)
 		return &opResult, nil
 	}
 	fmt.Println("didn't fail")
-	opResult.success = true
+	opResult.Success = true
 	return &opResult, m.ObjectIDsToString(result.InsertedIDs)
 
 }
@@ -116,21 +116,21 @@ func (m *MongoLoad) InsertDocuments(documents []interface{}) (*OperationResult, 
 //document is expected to be a BSON object
 func (m *MongoLoad) InsertDocument(document interface{}) (*OperationResult, string) {
 	opResult := OperationResult{
-		operation:     "InsertOne",
-		documentCount: 1,
+		Operation:     "InsertOne",
+		DocumentCount: 1,
 	}
 
 	collection := m.db.Collection(m.options.Collection)
 	start := time.Now()
 	result, err := collection.InsertOne(m.ctx, document)
-	opResult.duration = time.Since(start).Seconds()
+	opResult.Duration = time.Since(start).Seconds()
 
 	if err != nil {
-		opResult.success = false
+		opResult.Success = false
 		fmt.Println(err)
 		return &opResult, ""
 	}
-	opResult.success = true
+	opResult.Success = true
 	return &opResult, m.ObjectIDToString(result.InsertedID.(primitive.ObjectID))
 
 }
@@ -182,7 +182,7 @@ func (m *MongoLoad) InsertOneRoutine(docs chan interface{}, results chan *Operat
 
 		// write a document
 		or, _ := m.InsertDocument(document)
-		if !or.success {
+		if !or.Success {
 			fmt.Printf("insert failed: %v\n", or)
 		}
 

@@ -23,10 +23,32 @@ import (
 	"time"
 
 	"github.com/scbunn/mdbload/pkg/mongo"
+	"github.com/scbunn/mdbload/pkg/telemetry"
+	lane "gopkg.in/oleiade/lane.v1"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
+
+// prometheusOptions builds a new telemetry.PrometheusOptions object
+func prometheusOptions() *telemetry.PrometheusOptions {
+	options := telemetry.PrometheusOptions{
+		Frequency: viper.GetDuration("telemetry.pushgateway.frequency"),
+		Server:    viper.GetString("telemetry.pushgateway.server"),
+	}
+	return &options
+}
+
+// mongoDbOptions builds a new mongo.MongoLoadOptions object
+func mongoDbOptions() *mongo.MongoLoadOptions {
+	options := mongo.MongoLoadOptions{
+		ConnectionString: viper.GetString("mongodb.connectionString"),
+		Database:         viper.GetString("mongodb.database"),
+		Collection:       viper.GetString("mongodb.collection"),
+		TestDuration:     viper.GetDuration("duration"),
+	}
+	return &options
+}
 
 // startCmd represents the start command
 var startCmd = &cobra.Command{
@@ -39,15 +61,10 @@ var startCmd = &cobra.Command{
 		ctx, cancel := context.WithCancel(ctx)
 		defer cancel()
 
-		// MongoLoad Options
-		options := mongo.MongoLoadOptions{
-			ConnectionString: viper.GetString("mongodb.connectionString"),
-			Database:         viper.GetString("mongodb.database"),
-			Collection:       viper.GetString("mongodb.collection"),
-			TestDuration:     viper.GetDuration("duration"),
-		}
+		mongoOptions := mongoDbOptions()
+		promOptions := prometheusOptions()
 		mdb := new(mongo.MongoLoad)
-		if err := mdb.Init(ctx, options); err != nil {
+		if err := mdb.Init(ctx, mongoOptions); err != nil {
 			log.Fatal(err)
 		}
 		var documents []string
@@ -61,7 +78,7 @@ var startCmd = &cobra.Command{
 		}
 
 		// initial variables
-		var loadResults []*mongo.OperationResult
+		var resultsQueue *lane.Queue = lane.NewQueue()
 		results := make(chan *mongo.OperationResult, 1024)
 		docChannel := make(chan interface{}, 10)
 		defer close(docChannel)
@@ -77,8 +94,8 @@ var startCmd = &cobra.Command{
 		// start utility routines
 		utilityWaitGroup.Add(3)
 		go updateDocument(bsonDocuments, docChannel, &utilityWaitGroup, doneChannel)
-		go getResults(results, &loadResults, &utilityWaitGroup)
-		go pushMetrics(viper.GetDuration("telemetry.pushgateway.frequency"), &utilityWaitGroup, pgExit)
+		go getResults(results, resultsQueue, &utilityWaitGroup)
+		go telemetry.PushMetrics(promOptions, &utilityWaitGroup, pgExit)
 
 		// Start Load Generation
 		for i := 0; i < 20; i++ {
@@ -95,25 +112,12 @@ var startCmd = &cobra.Command{
 		utilityWaitGroup.Wait()
 
 		// get the results
-		fmt.Printf("documents: %v\n", len(loadResults))
+		fmt.Printf("documents: %v\n", resultsQueue.Size())
+		fmt.Printf("TPS: %v\n", telemetry.TPS(resultsQueue, mongoOptions.TestDuration))
 	},
 }
 
-// pushMetrics pushes prometheus metrics to a push gateway every n seconds
-func pushMetrics(d time.Duration, wg *sync.WaitGroup, exit chan bool) {
-	defer wg.Done()
-	for {
-		select {
-		case <-time.After(d):
-			fmt.Println("pushing metrics")
-		case <-exit:
-			fmt.Println("metrics shutting down")
-			return
-		}
-	}
-}
-
-func getResults(results chan *mongo.OperationResult, r *[]*mongo.OperationResult, wg *sync.WaitGroup) {
+func getResults(results chan *mongo.OperationResult, q *lane.Queue, wg *sync.WaitGroup) {
 	defer wg.Done()
 	for {
 		select {
@@ -122,7 +126,7 @@ func getResults(results chan *mongo.OperationResult, r *[]*mongo.OperationResult
 				fmt.Println("getResults is closing down shop")
 				return
 			}
-			*r = append(*r, opResult)
+			q.Enqueue(opResult)
 		}
 	}
 }
