@@ -17,15 +17,17 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"log"
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/scbunn/mdbload/pkg/mongo"
+	"github.com/scbunn/mdbload/pkg/queue"
 	"github.com/scbunn/mdbload/pkg/telemetry"
-	lane "gopkg.in/oleiade/lane.v1"
 
+	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -46,6 +48,10 @@ func mongoDbOptions() *mongo.MongoLoadOptions {
 		Database:         viper.GetString("mongodb.database"),
 		Collection:       viper.GetString("mongodb.collection"),
 		TestDuration:     viper.GetDuration("duration"),
+		ReadPreference:   viper.GetString("mongodb.readPreference"),
+		WriteAcks:        viper.GetInt("mongodb.writeConcern"),
+		EnableJournal:    viper.GetBool("mongodb.writeJournal"),
+		MaxPoolSize:      uint16(viper.GetUint("mongodb.connectionPoolSize")),
 	}
 	return &options
 }
@@ -56,13 +62,31 @@ var startCmd = &cobra.Command{
 	Short: "Start a load test",
 	Long:  `Starts a new load test against a mongodb cluter`,
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("start called: " + viper.GetString("mongodb.connectionString"))
+		log.WithFields(log.Fields{
+			"version": VERSION,
+			"build":   fmt.Sprintf("%s.%s", GITSHA, BUILDTIME),
+		}).Info("Starting local test")
 		ctx := context.Background()
 		ctx, cancel := context.WithCancel(ctx)
 		defer cancel()
 
+		registry := prometheus.NewRegistry()
+		// testing
+		/*
+			rq := queue.RedisQueue{}
+			rq.Init(registry)
+		*/
+
+		// create the queue
+		var q queue.Queue
+		mq := queue.MemoryQueue{}
+		mq.Init(registry)
+		q = &mq
+
 		mongoOptions := mongoDbOptions()
 		promOptions := prometheusOptions()
+		mongoOptions.Queue = &q
+		mongoOptions.PrometheusRegistry = registry
 		mdb := new(mongo.MongoLoad)
 		if err := mdb.Init(ctx, mongoOptions); err != nil {
 			log.Fatal(err)
@@ -78,8 +102,6 @@ var startCmd = &cobra.Command{
 		}
 
 		// initial variables
-		var resultsQueue *lane.Queue = lane.NewQueue()
-		results := make(chan *mongo.OperationResult, 1024)
 		docChannel := make(chan interface{}, 10)
 		defer close(docChannel)
 
@@ -92,57 +114,72 @@ var startCmd = &cobra.Command{
 		defer close(pgExit)
 
 		// start utility routines
-		utilityWaitGroup.Add(3)
-		metrics := telemetry.PrometheusMetrics{}
-		metrics.Init()
-		go updateDocument(bsonDocuments, docChannel, &utilityWaitGroup, doneChannel, &metrics)
-		go getResults(results, resultsQueue, &utilityWaitGroup)
-		go telemetry.PushMetrics(promOptions, &metrics, &utilityWaitGroup, pgExit)
+		utilityWaitGroup.Add(1)
+		metrics := telemetry.Prometheus{
+			Options:  promOptions,
+			Registry: registry,
+		}
+		go updateDocument(bsonDocuments, docChannel, &utilityWaitGroup, doneChannel)
+
+		if viper.GetBool("telemetry.pushgateway.enable") {
+			utilityWaitGroup.Add(1)
+			go metrics.PushMetrics(&utilityWaitGroup, pgExit)
+		}
 
 		// Start Load Generation
 		for i := 0; i < 20; i++ {
 			loadWaitGroup.Add(1)
-			go mdb.InsertOneRoutine(docChannel, results, &loadWaitGroup, &metrics)
+			go mdb.InsertOneRoutine(docChannel, &loadWaitGroup)
 		}
 		loadWaitGroup.Wait()
-		fmt.Println("done with load")
+		log.Info("Done with load")
+
+		//		log.Info(telemetry.DumpMetrics(&metrics))
+
+		// queue stuff
+		log.WithFields(log.Fields{
+			"size": q.Size(),
+		}).Info("queued up")
+		log.Info(q.Head())
+		item := q.Dequeue()
+		switch item.(type) {
+		case mongo.MongoDocument:
+			log.Info(item)
+		case string:
+			i := mongo.MongoDocument{}
+			err := json.Unmarshal([]byte(item.(string)), &i)
+			if err != nil {
+				log.Error(err)
+			}
+			log.Info(i)
+		}
+
+		for q.Head() != nil {
+			item := q.Dequeue()
+			log.Info(item)
+		}
 
 		// clean up utility routines
-		close(results)
 		doneChannel <- true
-		pgExit <- true
+		if viper.GetBool("telemetry.pushgateway.enable") {
+			pgExit <- true
+		}
+
 		utilityWaitGroup.Wait()
 
-		// get the results
-		fmt.Printf("documents: %v\n", resultsQueue.Size())
-		//		fmt.Printf("TPS: %v\n", telemetry.TPS(resultsQueue, mongoOptions.TestDuration))
 	},
 }
 
-func getResults(results chan *mongo.OperationResult, q *lane.Queue, wg *sync.WaitGroup) {
+func updateDocument(documents []interface{}, docs chan interface{}, wg *sync.WaitGroup, done chan bool) {
 	defer wg.Done()
-	for {
-		select {
-		case opResult, ok := <-results:
-			if !ok { // channel was closed; bail
-				fmt.Println("getResults is closing down shop")
-				return
-			}
-			q.Enqueue(opResult)
-		}
-	}
-}
-
-func updateDocument(documents []interface{}, docs chan interface{}, wg *sync.WaitGroup, done chan bool, metrics *telemetry.PrometheusMetrics) {
-	defer wg.Done()
-	templatesGenerated := *metrics.TemplatesGenerated
+	//	templatesGenerated := *metrics.TemplatesGenerated
 	for {
 		select {
 		case <-done:
-			fmt.Println("updateDocument closing down shop")
+			log.Info("updateDocument closing down shop")
 			return
 		case docs <- documents[0]:
-			templatesGenerated.Inc()
+			//			templatesGenerated.Inc()
 		default:
 		}
 	}
@@ -155,17 +192,9 @@ func init() {
 	startCmd.Flags().Duration("duration", 30*time.Second, "Duration of the load test")
 	viper.BindPFlag("duration", startCmd.Flags().Lookup("duration"))
 
-	// MongoDB settings
-	startCmd.Flags().String("mongodb-connection-string", "mongodb://127.0.0.1:27017", "MongoDB Connection String")
-	viper.BindPFlag("mongodb.connectionString", startCmd.Flags().Lookup("mongodb-connection-string"))
-	startCmd.Flags().Duration("mongodb-server-timeout", 1*time.Second, "MongoDB server connection timeout")
-	viper.BindPFlag("mongodb.serverTimeout", startCmd.Flags().Lookup("mongodb-server-timeout"))
-	startCmd.Flags().String("mongodb-database", "loadtest", "Database to use for load tests")
-	viper.BindPFlag("mongodb.database", startCmd.Flags().Lookup("mongodb-database"))
-	startCmd.Flags().String("mongodb-collection", "samples", "Collection to use for load tests")
-	viper.BindPFlag("mongodb.collection", startCmd.Flags().Lookup("mongodb-collection"))
-
 	// Telemetry
+	startCmd.Flags().Bool("pushgateway-enable", false, "Enable pushing metrics to a prometheus push gateway")
+	viper.BindPFlag("telemetry.pushgateway.enable", startCmd.Flags().Lookup("pushgateway-enable"))
 	startCmd.Flags().Duration("pushgateway-frequency", 30*time.Second, "Frequency to push metrics to a prometheus push gateway")
 	viper.BindPFlag("telemetry.pushgateway.frequency", startCmd.Flags().Lookup("pushgateway-frequency"))
 	startCmd.Flags().String("pushgateway-server", "127.0.0.1:9091", "Server and port of the prometheus push gateway")

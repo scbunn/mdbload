@@ -15,7 +15,9 @@
 
 package main
 
-import "github.com/scbunn/mdbload/cmd"
+import (
+	"github.com/scbunn/mdbload/cmd"
+)
 
 var (
 	// BuildInfo should get set at build time
