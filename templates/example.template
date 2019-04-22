@@ -1,0 +1,10 @@
+{
+  "name": "foobar",
+  "date": "{{date "Mon Jan _2 15:04:05 MST 2006"}}",
+  "items": [
+    {{- range seq 10}}
+    "{{product}}",
+    {{- end}}
+    "FixTheLastCommaOption"
+  ]
+}

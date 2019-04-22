@@ -26,21 +26,25 @@ import (
 
 // RedisQueue is a distributed FIFO queue using Redis
 type RedisQueue struct {
-	client *redis.Client
-	key    string
+	client   *redis.Client
+	key      string
+	Registry *prometheus.Registry
+	Server   string
 }
 
 // Init initializes a new RedisQueue
-func (q *RedisQueue) Init(registry *prometheus.Registry) {
+func (q *RedisQueue) Init() bool {
 	if q.client == nil {
 		q.client = redis.NewClient(&redis.Options{
-			Addr: "localhost:6379",
+			Addr: q.Server,
 		})
 	}
 	q.key = "mdbload:queue"
-	registry.MustRegister(queueLatency)
-	registry.MustRegister(queueSize)
-	registry.MustRegister(queueError)
+	q.Registry.MustRegister(queueLatency)
+	q.Registry.MustRegister(queueSize)
+	q.Registry.MustRegister(queueError)
+
+	return true
 }
 
 // Enqueue adds a new item to the queue

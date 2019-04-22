@@ -24,17 +24,19 @@ import (
 
 // MemoryQueue is an in-memory FIFO queue implementing the Queue interface
 type MemoryQueue struct {
-	queue *lane.Queue
+	queue    *lane.Queue
+	Registry *prometheus.Registry
 }
 
 // Init initializes a new in memory queue
-func (q *MemoryQueue) Init(registry *prometheus.Registry) {
+func (q *MemoryQueue) Init() bool {
 	if q.queue == nil {
 		q.queue = lane.NewQueue()
 	}
-	registry.MustRegister(queueLatency)
-	registry.MustRegister(queueSize)
-	registry.MustRegister(queueError)
+	q.Registry.MustRegister(queueLatency)
+	q.Registry.MustRegister(queueSize)
+	q.Registry.MustRegister(queueError)
+	return true
 }
 
 // Enqueue adds a new item to the queue

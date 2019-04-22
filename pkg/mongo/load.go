@@ -16,11 +16,13 @@ package mongo
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"sync"
 	"time"
 
+	"github.com/gofrs/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/scbunn/mdbload/pkg/queue"
 	log "github.com/sirupsen/logrus"
@@ -71,6 +73,7 @@ type MongoLoadOptions struct {
 	Collection           string
 	SocketTimeout        time.Duration
 	ServerConnectTimeout time.Duration
+	ConnectionTimeout    time.Duration
 	TestDuration         time.Duration
 	MaxPoolSize          uint16
 	ReadPreference       string
@@ -100,10 +103,8 @@ func configureOptions(opts *MongoLoadOptions) *options.ClientOptions {
 	o.SetMaxPoolSize(opts.MaxPoolSize)
 	o.SetAppName("MongoLoadTest " + opts.Version)
 	o.ApplyURI(opts.ConnectionString)
-	o.SetConnectTimeout(opts.ServerConnectTimeout)
-	o.SetConnectTimeout(1 * time.Second)
+	o.SetConnectTimeout(opts.ConnectionTimeout)
 	o.SetServerSelectionTimeout(opts.ServerConnectTimeout)
-	o.SetServerSelectionTimeout(1 * time.Second)
 	o.SetSocketTimeout(opts.SocketTimeout)
 
 	// Configure Read Preference
@@ -130,6 +131,7 @@ func configureOptions(opts *MongoLoadOptions) *options.ClientOptions {
 		"MaxPoolSize":            *o.MaxPoolSize,
 		"ServerSelectionTimeout": fmt.Sprintf("%s", o.ServerSelectionTimeout),
 		"SocketTimeout":          fmt.Sprintf("%s", o.SocketTimeout),
+		"ConnectionTimeout":      fmt.Sprintf("%s", o.ConnectTimeout),
 		"Database":               opts.Database,
 		"Collection":             opts.Collection,
 		"ReadPreference":         rp.Mode(),
@@ -143,6 +145,10 @@ func (m *MongoLoad) registerPrometheusMetrics(registry *prometheus.Registry) {
 	registry.MustRegister(operationLatency)
 	registry.MustRegister(operationFailure)
 	registry.MustRegister(documentCounter)
+
+	// Explicitly set failure counters to zero
+	operationFailure.WithLabelValues("insert").Add(0)
+	operationFailure.WithLabelValues("read").Add(0)
 }
 
 // Init Initialize a new connection to mongo and set the database
@@ -193,7 +199,7 @@ func (m *MongoLoad) InsertDocuments(documents []interface{}) ([]string, bool) {
 		operationFailure.WithLabelValues("insert").Add(float64(len(documents)))
 		return nil, false
 	}
-	return m.ObjectIDsToString(result.InsertedIDs), true
+	return ObjectIDsToString(result.InsertedIDs), true
 }
 
 //InsertDocument attempts to insert a single document into a mongo collection.
@@ -215,41 +221,130 @@ func (m *MongoLoad) InsertDocument(document interface{}) (string, bool) {
 		operationFailure.WithLabelValues("insert").Inc()
 		return "", false
 	}
-	return m.ObjectIDToString(result.InsertedID.(primitive.ObjectID)), true
+	return ObjectIDToString(result.InsertedID.(primitive.ObjectID)), true
+}
+
+// ReadDocument finds a document by _id and returns the result
+func (m *MongoLoad) ReadDocument(id string) bson.Raw {
+	collection := m.db.Collection(m.options.Collection)
+	start := time.Now()
+	l := log.WithFields(log.Fields{
+		"id":       id,
+		"duration": time.Since(start).Seconds(),
+	})
+
+	// convert ID to ObjectID
+	oid, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		l.Error("Could not convert id to ObjectID")
+		operationFailure.WithLabelValues("read").Inc()
+		return nil
+	}
+
+	// Build a search filter based on ObjectID
+	filter := bson.D{{"_id", oid}}
+
+	bytes, err := collection.FindOne(m.ctx, filter).DecodeBytes()
+	operationLatency.WithLabelValues("read").Observe(time.Since(start).Seconds())
+	if err != nil {
+		l.WithFields(log.Fields{
+			"error": err,
+		}).Error("Could not read a document")
+		operationFailure.WithLabelValues("read").Inc()
+	}
+	return bytes
 }
 
 // ObjectIDToString converts a mongo ObjectID to a string representation of
 // the hex value.
-func (m *MongoLoad) ObjectIDToString(oid primitive.ObjectID) string {
+func ObjectIDToString(oid primitive.ObjectID) string {
 	return oid.Hex()
 }
 
 // ObjectIDsToString converts an array of ObjectID primitives to their string
 // representations.
-func (m *MongoLoad) ObjectIDsToString(oids []interface{}) []string {
+func ObjectIDsToString(oids []interface{}) []string {
 	var results []string
 	for _, oid := range oids {
-		results = append(results, m.ObjectIDToString(oid.(primitive.ObjectID)))
+		results = append(results, ObjectIDToString(oid.(primitive.ObjectID)))
 	}
 	return results
 }
 
 // ConvertJSONtoBSON converts a JSON string to a BSON object
-func (m *MongoLoad) ConvertJSONtoBSON(document string) interface{} {
-	/*
-		var bsonDocument interface{}
-		err := mgoBSON.UnmarshalJSON([]byte(document), &bsonDocument)
-		if err != nil {
-			log.Fatal(err)
-		}
-		return bsonDocument
-	*/
+func ConvertJSONtoBSON(document string) interface{} {
 	var bsonDocument interface{}
 	err := bson.UnmarshalExtJSON([]byte(document), false, &bsonDocument)
 	if err != nil {
-		log.Fatal(err)
+		log.WithFields(log.Fields{
+			"error": err,
+			"json":  document,
+		}).Fatal("could not convert json to bson")
 	}
 	return bsonDocument
+}
+
+// ReadOneRoutine reads documents based on queue items until test duration has expired.
+func (m *MongoLoad) ReadOneRoutine(waitGroup *sync.WaitGroup) {
+	defer waitGroup.Done()
+	id, _ := uuid.NewV4()
+	q := *m.queue
+	l := log.WithFields(log.Fields{
+		"goroutineID": id,
+	})
+
+	// block until we get an initial item from the queue
+	var item interface{}
+	nextItem := q.Dequeue()
+	if nextItem == nil {
+		for {
+			nextItem = q.Dequeue()
+			if nextItem != nil {
+				item = nextItem
+				l.Info("starting to read documents")
+				break
+			}
+			time.Sleep(1 * time.Second)
+		}
+	} else {
+		item = nextItem
+		l.Info("starting to read documents")
+	}
+
+	if item == nil {
+		l.Info("How the hell does this happen?")
+	}
+	timeout := time.After(m.options.TestDuration)
+	for {
+		select {
+		case <-timeout: // duration has elapsed, exit
+			l.Debug("exiting due to timeout")
+			return
+		default: // do nothing
+		}
+
+		// Get an item from the queue and read it
+		nextItem := q.Dequeue()
+		if nextItem == nil {
+			l.WithFields(log.Fields{
+				"id": item.(MongoDocument).Id,
+			}).Debug("no item in queue, using old document")
+		} else {
+			item = nextItem
+		}
+
+		switch item.(type) {
+		case MongoDocument:
+			m.ReadDocument(item.(MongoDocument).Id)
+		case string:
+			i := MongoDocument{}
+			err := json.Unmarshal([]byte(item.(string)), &i)
+			if err != nil {
+				l.Error(err)
+			}
+			m.ReadDocument(i.Id)
+		}
+	}
 }
 
 // InsertOneRoutine writes documents in a loop until the duration has expired
@@ -260,25 +355,33 @@ func (m *MongoLoad) InsertOneRoutine(docs chan interface{}, waitGroup *sync.Wait
 	defer waitGroup.Done()
 	hostname, _ := os.Hostname()
 	timeout := time.After(m.options.TestDuration)
+	id, _ := uuid.NewV4()
+	l := log.WithFields(log.Fields{
+		"goroutineID": id,
+	})
 
 	// block until we get a document
 	// Document should be a BSON object
 	document := <-docs
 	q := *m.queue
+	l.Info("starting to write documents")
 	for {
 		select {
 		case <-timeout: // duration has elapsed so bail
+			l.Debug("exiting due to timeout")
 			return
 		case document = <-docs: // get a new document if there is one
+			l.Debug("got a new document")
 		default: // don't block until timeout
 		}
 
 		// write a document
 		id, ok := m.InsertDocument(document)
 		if !ok {
-			log.WithFields(log.Fields{
-				"ok": ok,
-				"id": id,
+			l.WithFields(log.Fields{
+				"ok":       ok,
+				"id":       id,
+				"instance": hostname,
 			}).Error("failed to insert document")
 			continue // don't enqueue a failed insert
 		}

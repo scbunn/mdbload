@@ -26,7 +26,7 @@ type Queue interface {
 	Size() int
 	Empty() bool
 	Head() interface{}
-	Init(registry *prometheus.Registry)
+	Init() bool
 }
 
 var (
