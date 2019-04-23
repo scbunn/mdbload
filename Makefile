@@ -28,7 +28,17 @@ $(PLATFORMS):
 	GOOS=$(os) GOARCH=amd64 go build $(LDFLAGS) -o release/$(BINARY)-$(VERSION)-$(os)-amd64
 
 .PHONY: release
-release: windows linux darwin  ## build releases
+release: windows linux darwin docker-publish ## build releases
+
+.PHONY: docker
+docker:
+	docker build --pull --build-arg GIT_SHA=$(GIT_SHA) --build-arg VERSION=$(VERSION) --build-arg BUILD_TIME=$(BUILD_TIME) -t quay.io/scbunn/mdbload:$(VERSION) .
+	docker image tag quay.io/scbunn/mdbload:$(VERSION) quay.io/scbunn/mdbload:latest
+
+.PHONY: docker-publish
+docker-publish: docker
+	docker push quay.io/scbunn/mdbload:$(VERSION)
+	docker push quay.io/scbunn/mdbload:latest
 
 clean:  ## clean project
 	@echo "cleaning project"
