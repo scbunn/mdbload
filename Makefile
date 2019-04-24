@@ -3,9 +3,8 @@ BIN_DIR := $(GOPATH)/bin
 GOMETALINTER := $(BIN_DIR)/gometalinter
 BINARY := mdbload
 PLATFORMS := windows linux darwin
-VERSION ?= v0.0.0.Development
 BUILD_TIME := $(shell date -u +%Y%m%d.%H%M%S)
-GIT_SHA := $(shell git describe --always --long --dirty)
+VERSION := $(shell git describe --always --long --dirty)
 GIT_SHA := $(shell git rev-parse HEAD)
 LDFLAGS := -ldflags "-w -s -X main.BUILD_DATE=$(BUILD_TIME) -X main.GIT_SHA=$(GIT_SHA) -X main.VERSION=$(VERSION)"
 os = $(word 1, $@)
