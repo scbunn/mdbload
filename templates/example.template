@@ -1,10 +1,17 @@
 {
-  "name": "foobar",
-  "date": "{{date "Mon Jan _2 15:04:05 MST 2006"}}",
-  "items": [
-    {{- range seq 10}}
-    "{{product}}",
+  "name": "{{ company }}",
+  "date": "{{ date "Mon, 02 Jan 2006 15:04:05 MST" }}",
+  "addresses": {
+    "ShipFrom": "{{ street }}",
+    "ShipTo": "{{ street }}"
+  },
+  "products": [
+    {{- range $i, $e := weightedSequence }}
+    {{if $i}},{{end}}
+    {
+      "name": "{{ product}}",
+      "quantity": {{ randomInt 100 }}
+    }
     {{- end}}
-    "FixTheLastCommaOption"
   ]
 }
