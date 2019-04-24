@@ -284,6 +284,28 @@ func ConvertJSONtoBSON(document string) interface{} {
 	return bsonDocument
 }
 
+// convert an untyped interface to a MongoDocument if possible
+func (m *MongoLoad) stringToMongoDocument(document interface{}) (*MongoDocument, bool) {
+	l := log.WithFields(log.Fields{
+		"document": document,
+	})
+	switch document.(type) {
+	case MongoDocument:
+		// If we are a MongoDocument return
+		return document.(*MongoDocument), true
+	case string: // try and convert to a JSON string to MongoDocument
+		i := MongoDocument{}
+		err := json.Unmarshal([]byte(document.(string)), &i)
+		if err != nil {
+			l.Error("Could not convert JSON to MongoDocument")
+			return nil, false
+		}
+		return &i, true
+	}
+	l.Errorf("could not convert unknown type (%T) to MongoDocument", document)
+	return nil, false
+}
+
 // ReadOneRoutine reads documents based on queue items until test duration has expired.
 func (m *MongoLoad) ReadOneRoutine(waitGroup *sync.WaitGroup) {
 	defer waitGroup.Done()
@@ -294,27 +316,25 @@ func (m *MongoLoad) ReadOneRoutine(waitGroup *sync.WaitGroup) {
 	})
 
 	// block until we get an initial item from the queue
-	var item interface{}
-	nextItem := q.Dequeue()
-	if nextItem == nil {
-		for {
-			nextItem = q.Dequeue()
-			if nextItem != nil {
-				item = nextItem
-				l.Info("starting to read documents")
-				break
+	var document *MongoDocument
+	var nextDocument *MongoDocument
+	var ok bool
+	for {
+		item := q.Dequeue()
+		if item != nil {
+			// make sure we have something from the queue we can work with
+			document, ok = m.stringToMongoDocument(item)
+			if ok {
+				break // document is a valid MongoDocument
 			}
-			time.Sleep(1 * time.Second)
 		}
-	} else {
-		item = nextItem
-		l.Info("starting to read documents")
+		time.Sleep(1 * time.Second)
 	}
 
-	if item == nil {
-		l.Info("How the hell does this happen?")
-	}
+	// if we are here then document should be a valid MongoDocument
+	l.Info("Starting to read documents")
 	timeout := time.After(m.options.TestDuration)
+
 	for {
 		select {
 		case <-timeout: // duration has elapsed, exit
@@ -323,27 +343,23 @@ func (m *MongoLoad) ReadOneRoutine(waitGroup *sync.WaitGroup) {
 		default: // do nothing
 		}
 
-		// Get an item from the queue and read it
-		nextItem := q.Dequeue()
-		if nextItem == nil {
-			l.WithFields(log.Fields{
-				"id": item.(MongoDocument).Id,
-			}).Debug("no item in queue, using old document")
-		} else {
-			item = nextItem
+		m.ReadDocument(document.Id) // try and read a document
+
+		// try and get another item from the queue
+		item := q.Dequeue()
+		if nextDocument != nil {
+			// got something, is it useful?
+			nextDocument, ok = m.stringToMongoDocument(item)
+			if ok {
+				document = nextDocument
+				continue
+			}
 		}
 
-		switch item.(type) {
-		case MongoDocument:
-			m.ReadDocument(item.(MongoDocument).Id)
-		case string:
-			i := MongoDocument{}
-			err := json.Unmarshal([]byte(item.(string)), &i)
-			if err != nil {
-				l.Error(err)
-			}
-			m.ReadDocument(i.Id)
-		}
+		// either we got no document or not a MongoDocument
+		l.WithFields(log.Fields{
+			"id": document.Id,
+		}).Debug("no item in queue, using old document")
 	}
 }
 
