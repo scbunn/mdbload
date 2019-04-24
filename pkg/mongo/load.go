@@ -63,6 +63,16 @@ var (
 			Help:      "The number of documents inserted",
 		},
 	)
+
+	// track document size distribution
+	documentSize = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Namespace: "mdbload",
+			Name:      "document_size_bytes",
+			Help:      "The size of a document (as reported by sizeof)",
+			Buckets:   prometheus.ExponentialBuckets(1024, 2, 10),
+		},
+	)
 )
 
 // MongoLoadOptions type for containing load testing options
@@ -145,6 +155,7 @@ func (m *MongoLoad) registerPrometheusMetrics(registry *prometheus.Registry) {
 	registry.MustRegister(operationLatency)
 	registry.MustRegister(operationFailure)
 	registry.MustRegister(documentCounter)
+	registry.MustRegister(documentSize)
 
 	// Explicitly set failure counters to zero
 	operationFailure.WithLabelValues("insert").Add(0)
@@ -215,6 +226,11 @@ func (m *MongoLoad) InsertDocument(document interface{}) (string, bool) {
 	start := time.Now()
 	result, err := collection.InsertOne(m.ctx, document)
 	operationLatency.WithLabelValues("insert").Observe(time.Since(start).Seconds())
+
+	// record the size of the document
+	// TODO: this feels heavy, find a better way
+	b, _ := bson.Marshal(document)
+	documentSize.Observe(float64(len(b)))
 
 	if err != nil {
 		log.Error(err)
