@@ -308,7 +308,8 @@ func (m *MongoLoad) stringToMongoDocument(document interface{}) (*MongoDocument,
 	switch document.(type) {
 	case MongoDocument:
 		// If we are a MongoDocument return
-		return document.(*MongoDocument), true
+		doc := document.(MongoDocument)
+		return &doc, true
 	case string: // try and convert to a JSON string to MongoDocument
 		i := MongoDocument{}
 		err := json.Unmarshal([]byte(document.(string)), &i)

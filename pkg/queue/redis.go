@@ -21,7 +21,7 @@ import (
 
 	"github.com/go-redis/redis"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/common/log"
+	log "github.com/sirupsen/logrus"
 )
 
 // RedisQueue is a distributed FIFO queue using Redis
@@ -70,7 +70,11 @@ func (q *RedisQueue) Dequeue() interface{} {
 	start := time.Now()
 	item, err := q.client.BLPop(1*time.Second, q.key).Result()
 	if err != nil {
-		log.Error(err)
+		log.WithFields(log.Fields{
+			"error": err,
+			"key":   q.key,
+			"item":  item,
+		}).Error("error getting an item from the queue.")
 		queueError.WithLabelValues("dequeue").Inc()
 		return nil
 	}
